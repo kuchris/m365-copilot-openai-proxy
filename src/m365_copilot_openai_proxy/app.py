@@ -9,41 +9,63 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .config import Settings
+from .browser_client import BrowserCopilotClient
 from .session_store import PersistentSession, PersistentSessionStore
 from .substrate_client import SubstrateCopilotClient, SubstrateCopilotError
 from .token_store import AccessTokenStore
+from .websocket_client import BrowserCredentialProvider, WebSocketCopilotClient
 from .models import AnthropicMessagesRequest, OpenAIChatRequest, OpenAIResponsesRequest
 from .translator import translate_anthropic_request, translate_openai_request, translate_responses_request
 
 _PERSIST_MODEL_SUFFIX = ":persist"
 _SESSION_ID_HEADER = "x-m365-session-id"
+CopilotClient = SubstrateCopilotClient | BrowserCopilotClient | WebSocketCopilotClient
 
 
 def create_app(
     settings: Settings | None = None,
-    copilot_client_factory: Callable[[], SubstrateCopilotClient] | None = None,
+    copilot_client_factory: Callable[[], CopilotClient] | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Microsoft 365 Copilot OpenAI Proxy")
     resolved_settings = settings or Settings()
     app.state.settings = resolved_settings
     app.state.token_store = AccessTokenStore(resolved_settings.access_token)
     app.state.session_store = PersistentSessionStore()
-    app.state.copilot_client_factory = copilot_client_factory or (
-        lambda: SubstrateCopilotClient(app.state.token_store.get(), resolved_settings.time_zone)
-    )
+    browser_client = BrowserCopilotClient(resolved_settings.cdp_port, resolved_settings.browser_timeout_seconds, auto_verify=resolved_settings.browser_auto_verify)
+    if resolved_settings.backend == "websocket":
+        provider = BrowserCredentialProvider(resolved_settings.cdp_port, resolved_settings.browser_timeout_seconds, resolved_settings.credential_refresh_seconds, auto_verify=resolved_settings.browser_auto_verify)
+        app.state.credential_provider = provider
+        websocket_client = WebSocketCopilotClient(provider, resolved_settings.browser_timeout_seconds)
+        app.state.copilot_client_factory = copilot_client_factory or (lambda: websocket_client)
+    elif resolved_settings.backend == "browser":
+        app.state.copilot_client_factory = copilot_client_factory or (lambda: browser_client)
+    else:
+        app.state.copilot_client_factory = copilot_client_factory or (
+            lambda: SubstrateCopilotClient(app.state.token_store.get(), resolved_settings.time_zone)
+        )
 
     def get_settings() -> Settings:
         return app.state.settings
 
-    def get_copilot_client() -> SubstrateCopilotClient:
+    def get_copilot_client() -> CopilotClient:
         return app.state.copilot_client_factory()
 
     @app.get("/healthz")
     async def healthz() -> dict:
+        if resolved_settings.backend == "websocket":
+            status = await provider.status()
+            return {"status": "ok" if status["ready"] else "initializing" if status["browser_connected"] else "degraded", "backend": "websocket", "credentials": status}
+        if resolved_settings.backend == "browser":
+            status = await browser_client.status()
+            return {"status": "ok" if status["connected"] else "degraded", "backend": "browser", "browser": status}
         return {"status": "ok", "token": app.state.token_store.status()}
 
     @app.get("/v1/token/status")
     async def token_status() -> dict:
+        if resolved_settings.backend == "websocket":
+            return {"backend": "websocket", **await provider.status()}
+        if resolved_settings.backend == "browser":
+            return {"required": False, "backend": "browser"}
         return app.state.token_store.status()
 
     @app.get("/v1/models")
@@ -64,7 +86,7 @@ def create_app(
         raw_request: Request,
         request: OpenAIChatRequest,
         settings: Settings = Depends(get_settings),
-        client: SubstrateCopilotClient = Depends(get_copilot_client),
+        client: CopilotClient = Depends(get_copilot_client),
     ):
         try:
             translated = translate_openai_request(request)
@@ -104,7 +126,7 @@ def create_app(
     async def openai_responses(
         raw: Request,
         settings: Settings = Depends(get_settings),
-        client: SubstrateCopilotClient = Depends(get_copilot_client),
+        client: CopilotClient = Depends(get_copilot_client),
     ):
         body = await raw.json()
         try:
@@ -144,7 +166,7 @@ def create_app(
         raw_request: Request,
         request: AnthropicMessagesRequest,
         settings: Settings = Depends(get_settings),
-        client: SubstrateCopilotClient = Depends(get_copilot_client),
+        client: CopilotClient = Depends(get_copilot_client),
     ):
         try:
             translated = translate_anthropic_request(request)
@@ -193,7 +215,7 @@ def _persistent_session(
 
 async def _openai_stream(
     model_alias: str,
-    client: SubstrateCopilotClient,
+    client: CopilotClient,
     prompt: str,
     additional_context: list[str],
     session: PersistentSession | None = None,
@@ -235,7 +257,7 @@ async def _openai_stream(
 
 async def _responses_stream(
     model_alias: str,
-    client: SubstrateCopilotClient,
+    client: CopilotClient,
     prompt: str,
     additional_context: list[str],
     session: PersistentSession | None = None,
@@ -263,7 +285,7 @@ async def _responses_stream(
 
 async def _anthropic_stream(
     model_alias: str,
-    client: SubstrateCopilotClient,
+    client: CopilotClient,
     prompt: str,
     additional_context: list[str],
     session: PersistentSession | None = None,

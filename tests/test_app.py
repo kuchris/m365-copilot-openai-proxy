@@ -79,7 +79,7 @@ def test_models_endpoint() -> None:
 
 
 def test_app_starts_without_token_for_startup_capture() -> None:
-    app = create_app(settings=Settings(M365_ACCESS_TOKEN=""))
+    app = create_app(settings=Settings(M365_ACCESS_TOKEN="", M365_BACKEND="substrate", _env_file=None))
     client = TestClient(app)
 
     response = client.get("/v1/token/status")
@@ -90,7 +90,7 @@ def test_app_starts_without_token_for_startup_capture() -> None:
 
 
 def test_token_status_reports_expiry() -> None:
-    settings = Settings(M365_ACCESS_TOKEN=make_jwt(int(time.time()) + 3600))
+    settings = Settings(M365_ACCESS_TOKEN=make_jwt(int(time.time()) + 3600), M365_BACKEND="substrate", _env_file=None)
     app = create_app(settings=settings, copilot_client_factory=lambda: FakeCopilotClient())
     client = TestClient(app)
 
@@ -104,7 +104,7 @@ def test_token_status_reports_expiry() -> None:
 
 
 def test_healthz_includes_token_remaining_time() -> None:
-    settings = Settings(M365_ACCESS_TOKEN=make_jwt(int(time.time()) + 3600))
+    settings = Settings(M365_ACCESS_TOKEN=make_jwt(int(time.time()) + 3600), M365_BACKEND="substrate", _env_file=None)
     app = create_app(settings=settings, copilot_client_factory=lambda: FakeCopilotClient())
     client = TestClient(app)
 
@@ -118,7 +118,7 @@ def test_healthz_includes_token_remaining_time() -> None:
 
 
 def test_token_status_rejects_non_substrate_token() -> None:
-    settings = Settings(M365_ACCESS_TOKEN=make_jwt(int(time.time()) + 3600, aud="394866fc-eedb"))
+    settings = Settings(M365_ACCESS_TOKEN=make_jwt(int(time.time()) + 3600, aud="394866fc-eedb"), M365_BACKEND="substrate", _env_file=None)
     app = create_app(settings=settings, copilot_client_factory=lambda: FakeCopilotClient())
     client = TestClient(app)
 

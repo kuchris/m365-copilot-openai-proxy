@@ -1,5 +1,7 @@
 # Token Refresh Automation Options
 
+These historical notes describe the original `substrate` JWT backend. The newer `websocket` backend captures opaque access tokens, connection parameters, and browser-generated verification data together, retaining them in memory. It refreshes on demand after 45 minutes by default and after an explicit authentication rejection. See the [README](README.md#token-refresh) for current behavior and limitations.
+
 The `substrate.office.com` API requires a user JWT that expires in ~1 hour. Admin consent is blocked, so tokens cannot be obtained programmatically via MSAL device code flow. Browser automation is required.
 
 ## Current manual flow

@@ -16,6 +16,7 @@ import uvicorn
 import websockets
 
 from .app import create_app
+from .config import Settings
 from .token_store import decode_jwt_payload, is_substrate_token_claims
 
 
@@ -338,6 +339,10 @@ def main() -> None:
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", type=int, default=8000)
     serve_parser.add_argument("--cdp-port", type=int, default=9222)
+    serve_parser.add_argument("--backend", choices=["substrate", "websocket", "browser"], default=None)
+    serve_parser.add_argument("--browser-timeout-seconds", type=float, default=None)
+    serve_parser.add_argument("--auto-verify", action="store_true", default=None,
+                              help="Try one recognized Cloudflare verification checkbox automatically.")
     serve_parser.add_argument("--no-auto-refresh", action="store_true")
     serve_parser.add_argument("--no-launch-edge", action="store_true")
     serve_parser.add_argument("--no-capture-on-start", action="store_true")
@@ -398,8 +403,20 @@ def capture_token_command(args: argparse.Namespace) -> None:
 
 def serve_command(args: argparse.Namespace) -> None:
     cdp_port: int = args.cdp_port
+    settings = Settings()
+    settings_updates = {"cdp_port": cdp_port}
+    if args.backend is not None:
+        settings_updates["backend"] = args.backend
+    if args.auto_verify is not None:
+        settings_updates["browser_auto_verify"] = args.auto_verify
+    if args.browser_timeout_seconds is not None:
+        if args.browser_timeout_seconds <= 0:
+            raise SystemExit("--browser-timeout-seconds must be greater than zero.")
+        settings_updates["browser_timeout_seconds"] = args.browser_timeout_seconds
+    settings = settings.model_copy(update=settings_updates)
+    browser_mode = settings.backend in ("browser", "websocket")
     while True:
-        app = create_app()
+        app = create_app(settings=settings)
         config = uvicorn.Config(app, host=args.host, port=args.port)
         server = uvicorn.Server(config)
         stop_auto_refresh = threading.Event()
@@ -411,14 +428,14 @@ def serve_command(args: argparse.Namespace) -> None:
 
         thread = threading.Thread(target=server.run, daemon=True)
         thread.start()
-        if not args.no_capture_on_start and _needs_substrate_token(_read_token()):
+        if not browser_mode and not args.no_capture_on_start and _needs_substrate_token(_read_token()):
             capture_thread = threading.Thread(
                 target=_startup_capture_loop,
                 args=(cdp_port, args.capture_timeout_seconds),
                 daemon=True,
             )
             capture_thread.start()
-        if not args.no_auto_refresh:
+        if not browser_mode and not args.no_auto_refresh:
             auto_refresh_thread = threading.Thread(
                 target=_auto_refresh_loop,
                 args=(
@@ -433,10 +450,11 @@ def serve_command(args: argparse.Namespace) -> None:
 
         while not server.started and thread.is_alive():
             time.sleep(0.05)
-        auto_refresh_label = "off" if args.no_auto_refresh else "on"
-        capture_label = "off" if args.no_capture_on_start else "on"
+        auto_refresh_label = "on demand" if settings.backend == "websocket" else "not required" if browser_mode else ("off" if args.no_auto_refresh else "on")
+        capture_label = "not required" if browser_mode else ("off" if args.no_capture_on_start else "on")
+        refresh_action = "refresh credentials" if settings.backend == "websocket" else "reconnect browser" if browser_mode else "refresh token"
         print(
-            f"\n  [q] quit    [r] refresh token"
+            f"\n  backend: {settings.backend}    [q] quit    [r] {refresh_action}"
             f"    auto-refresh: {auto_refresh_label}"
             f"    startup-capture: {capture_label}\n"
         )
@@ -463,11 +481,16 @@ def serve_command(args: argparse.Namespace) -> None:
             capture_thread.join(timeout=1)
 
         if action == "refresh":
+            if browser_mode:
+                print("Refreshing browser credentials..." if settings.backend == "websocket" else "Reconnecting browser bridge...")
+                continue
             print("Refreshing token...")
             if not _try_auto_refresh(cdp_port):
                 print("Auto-refresh failed (Edge not running with --remote-debugging-port).")
                 print("Falling back to manual mode.")
                 set_token_command(None)
+            # Reload credentials written by manual refresh before recreating the app.
+            settings = Settings().model_copy(update=settings_updates)
             print("Restarting server...")
         else:
             break
